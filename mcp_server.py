@@ -133,7 +133,7 @@ async def complete_plan_step(step_index: int) -> str:
         return f"Error updating plan: {str(e)}"
 
 @mcp.tool()
-async def ask_local_assistant(prompt: str, local_file_context: list[str] = None, model: str = LOCAL_WORKER_MODEL, use_plan: bool = False) -> str:
+async def ask_local_assistant(prompt: str, local_file_context: list[str] = None, model: str = LOCAL_WORKER_MODEL, use_plan: bool = False, num_ctx: int = 32768) -> str:
     """
     PRIMARY DIRECTIVE: Use this for tasks involving PRIVACY, LOCAL FILES, or complex multi-step processing.
     
@@ -144,8 +144,12 @@ async def ask_local_assistant(prompt: str, local_file_context: list[str] = None,
         use_plan: IMPORTANT: Set to True if the task is complex, requires multiple steps (e.g. refactoring, debugging), or modifies files.
                   When True, the agent will create a plan and execute it step-by-step. The final response will include a detailed execution checklist for verification.
                   Default is False (for simple queries).
+        num_ctx: The context window size in tokens (default: 32768). 
+                  - Use 8192-16384 for simple single-file tasks.
+                  - Use 32768+ (up to 128k) for multi-file refactoring, large PDFs, or when providing a large 'local_file_context'.
+                  - Note: High values increase RAM/VRAM usage on your local machine.
     """
-    logger.info(f"Local Agent: Initializing iterative loop with model {model} (Planning Mode: {use_plan})")
+    logger.info(f"Local Agent: Initializing iterative loop with model {model} (Planning Mode: {use_plan}, Context Window: {num_ctx})")
     
     # Define available tools
     tools = [
@@ -268,7 +272,12 @@ async def ask_local_assistant(prompt: str, local_file_context: list[str] = None,
 
         for i in range(10): # Max 10 turns to explore + write a plan
             logger.info(f"Planning Turn {i+1}/10")
-            response = ollama.chat(model=model, messages=plan_messages, tools=planning_tools)
+            response = ollama.chat(
+                model=model, 
+                messages=plan_messages, 
+                tools=planning_tools,
+                options={'num_ctx': num_ctx}
+            )
             msg = response.get('message', {})
             logger.info(f"Planning Response: {msg}")
             plan_messages.append(msg)
@@ -396,7 +405,12 @@ async def ask_local_assistant(prompt: str, local_file_context: list[str] = None,
             
             current_messages = messages + [{'role': 'system', 'content': loop_system_msg}]
             
-            response = ollama.chat(model=model, messages=current_messages, tools=tools)
+            response = ollama.chat(
+                model=model, 
+                messages=current_messages, 
+                tools=tools,
+                options={'num_ctx': num_ctx}
+            )
             assistant_msg = response.get('message', {})
             messages.append(assistant_msg)
             
@@ -417,7 +431,12 @@ async def ask_local_assistant(prompt: str, local_file_context: list[str] = None,
                     
                     try:
                         # Force JSON mode for the reflection
-                        ref_response = ollama.chat(model=model, messages=reflection_messages, format='json')
+                        ref_response = ollama.chat(
+                            model=model, 
+                            messages=reflection_messages, 
+                            format='json',
+                            options={'num_ctx': num_ctx}
+                        )
                         ref_content = ref_response.get('message', {}).get('content', '{}')
                         ref_data = json.loads(ref_content)
                         

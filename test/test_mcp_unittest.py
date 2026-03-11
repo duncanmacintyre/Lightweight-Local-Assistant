@@ -171,11 +171,14 @@ class TestMCPServer(unittest.IsolatedAsyncioTestCase):
             # Verify Planning Prompt
             plan_msg = mock_chat.call_args_list[0][1]['messages'][0]['content']
             self.assertIn("Senior Technical Planner", plan_msg)
+            self.assertIn("Do NOT execute implementation steps yet", plan_msg)
+            self.assertEqual(mock_chat.call_args_list[0][1]['options'], {'num_ctx': 32768})
             
             # Verify Execution Prompt (Plan Injection)
-            # The execution phase starts at turn 3 (index 2)
+            # Planning took 2 turns (one for tool call, one for content-only finish)
             exec_context_msg = mock_chat.call_args_list[2][1]['messages'][-1]['content']
             self.assertIn("CURRENT PLAN STATE", exec_context_msg)
+            self.assertEqual(mock_chat.call_args_list[2][1]['options'], {'num_ctx': 32768})
             
             # Verify Final Output contains the plan
             self.assertIn("--- EXECUTION PLAN ---", result)
@@ -374,6 +377,7 @@ class TestMCPServer(unittest.IsolatedAsyncioTestCase):
         await ask_local_assistant("Hello", model="llama3")
         kwargs = mock_chat.call_args_list[0][1]
         self.assertEqual(kwargs['model'], "llama3")
+        self.assertEqual(kwargs['options'], {'num_ctx': 32768})
 
 if __name__ == "__main__":
     unittest.main()
