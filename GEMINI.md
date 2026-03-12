@@ -1,98 +1,53 @@
-# Local Assistant for Gemini CLI - Development Context
+# Lightweight Local Assistant - Development Context
 
-This project provides a secure, private bridge between the cloud-based Gemini CLI and the user's local machine. It allows Gemini to perform complex tasks (searching, refactoring, summarization) locally, ensuring sensitive data remains on the host while delegating "execution" to a local AI model (via Ollama).
+This project provides a secure, private bridge between cloud-based LLMs (like Gemini) and a user's local machine. It serves a dual purpose:
+1. A **standalone Python library** for building autonomous local AI workflows.
+2. A **Gemini CLI extension** (via MCP) that allows Gemini to interactively perform local tasks.
 
 ## Architecture: "Cloud Brain, Local Hands"
 
-- **Frontend:** Gemini CLI running in **Interactive Mode**.
-- **Integration:** Runs as a child process via **Stdio** transport.
-- **Discovery Layer:** Automatically inspects the local model (Ollama) to detect native context limits.
-- **Execution Engine:** Iterative loop with a **Context Guard** that truncates large outputs to prevent memory overflow.
-- **Security Layer:** 
-    - **Inherited Sandbox:** Relies on the Gemini CLI's `sandbox-exec` wrapper (`gemini -s`).
-    - **Self-Check:** The assistant refuses to start unless it detects it is running within a macOS sandbox via `libsandbox`.
-- **Backend Models:**
-    - **Local (User Choice):** Default is `qwen3-coder:30b` via Ollama.
-    - **Cloud Brain (Gemini):** High-level reasoning and orchestrator.
+The core philosophy of this project is to delegate sensitive file processing and command execution to a local AI model (via Ollama), while a more powerful cloud model acts as the orchestrator.
 
-### Model Ecosystem
+### The Python Library (`lightweight_local_assistant`)
 
-| Model | Role | Type | Trigger |
-| :--- | :--- | :--- | :--- |
-| **Local (User Choice)** | **Local Agent** | Local | Tool: `ask_local_assistant` |
-| **Gemini (Cloud)** | **Brain** | Cloud API | Default Reasoning / Orchestrator |
+- **`LocalAssistant` (in `agent.py`)**: The primary class. It implements a "Think-Act-Observe" reasoning loop. It dynamically injects context limits, handles self-reflection to determine if a task is complete, and supports a structured **Planning Mode** (`use_plan=True`) for complex tasks.
+- **`tools.py`**: Contains OS-agnostic implementations of the core capabilities:
+  - `run_shell_command`: Executes commands via `asyncio.create_subprocess_shell`.
+  - `_read_local_file`: Efficiently reads text and PDF files, supporting pagination and tailing to manage context windows.
+  - `write_file_tool`: Safely writes output to disk.
+- **`models.py`**: Handles discovery of local Ollama models and their context limits.
+- **`security.py`**: Manages sandbox detection and the cleanup of orphaned subprocesses.
 
-## Building and Running
+### The Gemini CLI Extension (`mcp_server.py`)
 
-### Prerequisites
-- **macOS**: Required for `libsandbox` security.
-- **Ollama**: Must be installed and running.
-- **Gemini CLI**: The host application.
+- This is a thin wrapper built using `FastMCP`.
+- It imports the library's functions and exposes them as tools to the Gemini CLI.
+- **Security Constraint:** When run as an MCP server for Gemini CLI, the script enforces a strict macOS sandboxing check (`libsandbox.1.dylib`). It will refuse to start if it is not running within a secure `seatbelt` environment to prevent the cloud agent from arbitrarily exploring the host filesystem.
 
-### Installation
-Run the provided installer to set up the environment and register the extension:
+## Development & Testing
+
+### Installation for Development
+1. Clone the repository.
+2. Create a virtual environment: `python3 -m venv .venv && source .venv/bin/activate`
+3. Install in editable mode with dev dependencies: `pip install -e ".[dev]"`
+
+### Testing Strategy
+The test suite (in the `test/` directory) uses `pytest` and `unittest` paradigms. It heavily utilizes `unittest.mock.patch` and `AsyncMock` to isolate the `LocalAssistant` logic from the actual Ollama network calls and local file system side-effects.
+
+**To run the tests:**
 ```bash
-./install_extension.sh
-```
-This script:
-1.  Checks for Ollama.
-2.  Prompts for a default local model.
-3.  Creates a virtual environment in `~/.gemini-local-assistant`.
-4.  Generates a `run_safe` wrapper script.
-5.  Registers the server with Gemini CLI.
-
-### Running
-The server is started automatically by Gemini CLI when needed.
-**CRITICAL:** Gemini CLI must be launched with the `-s` (sandbox) flag for the Local Assistant to function.
-```bash
-gemini -s "your prompt here"
-```
-
-### Testing
-Tests are located in the `test/` directory and use `pytest`.
-```bash
-pip install -r requirements-dev.txt
 pytest
 ```
-Tests cover:
-- Sandbox detection (`libsandbox.1.dylib`).
-- Partial file reading (offset/limit for text, pages for PDF).
-- Tool execution logic.
-- The iterative agent loop (using mocked Ollama responses).
 
-## Development Conventions
+**Key Test Coverage Areas:**
+- **Agent Loop**: Verification of turn limits, missing tool handling, and self-correction reflection.
+- **Planning Mode**: Verification of the 2-phase (plan -> execute) workflow and the checklist update logic.
+- **V2 Features**: Context guard truncation, batch operations, and PDF reading.
+- **Security**: Verification of the macOS sandbox check.
 
-### Tools
-Tools are defined using the `@mcp.tool()` decorator in `mcp_server.py`. Primary tools include:
-- **`ask_local_assistant`:** The main iterative reasoning agent. Supports `use_plan`, `num_ctx`, and `max_turns`.
-- **`run_shell_command`:** Executes `zsh` commands (batch support).
-- **`read_file`:** Reads files with `offset/limit/pages` (batch support).
-- **`write_file`:** Direct file access within the working directory.
-- **`get_model_info`:** Retrieves local model metadata.
-- **`request_clarification`:** Pauses execution to ask the user a question.
-- **`list_local_models`:** Lists available Ollama models.
+## Future Roadmap Ideas
 
-### Code Structure
-- `mcp_server.py`: The entry point and definition of all MCP tools.
-- `ask_local_assistant`: The primary tool used by Gemini. it implements two modes:
-    - **Direct Execution:** Single-turn or simple iterative tasks.
-    - **Planning Mode (`use_plan=True`):** A two-phase workflow (Planning -> Execution) that uses a Markdown checklist at `.gemini/local_plan.md`.
-
-### Adding Tools
-If a tool is intended to be used *internally* by the local agent, it must be added to the `tools` list within the `ask_local_assistant` function.
-
-### Security and Privacy
-- **Sandboxing:** The server checks for the macOS sandbox at startup and refuses to run without it.
-- **Local-Only:** File reading and shell execution are performed locally. The agent is instructed to only return the specific requested information to Gemini (Cloud) to minimize data exposure.
-- **Anonymization:** The agent is prompted to anonymize PII unless specifically requested otherwise.
-
-## Future Roadmap
-
-- [ ] **Robust Planning:** Improve vague task handling via discovery turns.
-- [ ] **Intelligent Summarization Pass:** Optional flag for summarizing massive files.
-- [ ] **Local RAG:** Integrate Vector DB for project-wide semantic search.
-- [ ] **Safe Mode (Read-Only):** A dedicated tool with zero write/execute permissions.
-- [ ] **Dynamic Model Routing:** Support task-specific model selection.
-- [ ] **Subagent Integration:** Refactor into a formal Subagent for cleaner delegation.
-- [ ] **Asynchronous Execution:** Support parallel background processing for long local tasks.
-- [ ] **Standalone CLI Mode:** Develop a terminal-based frontend for independent, local-only use.
+1. **Intelligent Summarization Pass:** Add an optional tool for the local agent to summarize massive files before returning context to the cloud orchestrator.
+2. **Local RAG Integration:** Connect to a local Vector DB to enable semantic project search rather than relying purely on shell `grep`/`find`.
+3. **Safe Mode:** Create a strictly read-only version of the `ask` loop that strips write/execute permissions entirely.
+4. **Dynamic Routing:** Allow the assistant to switch local models on the fly (e.g., using a coding model for refactoring and a general model for summarization).

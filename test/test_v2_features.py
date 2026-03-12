@@ -2,10 +2,18 @@ import pytest
 import json
 import os
 from unittest.mock import MagicMock, patch, AsyncMock
-from mcp_server import get_model_info, ask_local_assistant, _read_local_file
+from lightweight_local_assistant import get_model_info, LocalAssistant
+from lightweight_local_assistant.tools import _read_local_file
+
+def setup_mock_client(mock_client_class):
+    mock_client = MagicMock()
+    mock_client_class.return_value = mock_client
+    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
+    mock_client.chat = AsyncMock()
+    return mock_client
 
 @pytest.mark.asyncio
-@patch("mcp_server.ollama.AsyncClient")
+@patch("lightweight_local_assistant.models.ollama.AsyncClient")
 async def test_get_model_info_qwen(mock_client_class):
     """Verify that get_model_info correctly extracts qwen-specific context limit."""
     mock_client = MagicMock()
@@ -30,13 +38,10 @@ async def test_get_model_info_qwen(mock_client_class):
     assert data["parameter_size"] == "30B"
 
 @pytest.mark.asyncio
-@patch("mcp_server.ollama.AsyncClient")
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
 async def test_batch_read_file(mock_client_class, tmp_path):
     """Test reading multiple files in a single tool call."""
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
 
     # Create two test files
     f1 = tmp_path / "a.txt"
@@ -65,9 +70,10 @@ async def test_batch_read_file(mock_client_class, tmp_path):
 
     # We mock os.path.exists for the files
     with patch("os.path.exists", return_value=True):
-        result = await ask_local_assistant("Read a and b")
+        assistant = LocalAssistant()
+        result = await assistant.ask("Read a and b")
 
-    # In ask_local_assistant, tool results are appended to the 'messages' list.
+    # In ask, tool results are appended to the 'messages' list.
     # The history sent in Turn 2 should contain the result of Turn 1.
     history_sent_to_turn_2 = mock_client.chat.call_args_list[1][1]['messages']
 
@@ -81,13 +87,11 @@ async def test_batch_read_file(mock_client_class, tmp_path):
     assert "content B" in tool_result_msg['content']
 
 @pytest.mark.asyncio
-@patch("mcp_server.ollama.AsyncClient")
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
 async def test_context_guard_truncation(mock_client_class, tmp_path):
     """Test that large outputs are truncated by the Context Guard."""
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 1000}})
-    mock_client.chat = AsyncMock()
 
     # Set a small num_ctx to trigger truncation easily
     num_ctx = 1000
@@ -114,7 +118,8 @@ async def test_context_guard_truncation(mock_client_class, tmp_path):
     ]
 
     with patch("os.path.exists", return_value=True):
-        await ask_local_assistant("Read large", num_ctx=num_ctx)
+        assistant = LocalAssistant()
+        await assistant.ask("Read large", num_ctx=num_ctx)
 
     history_sent_to_turn_2 = mock_client.chat.call_args_list[1][1]['messages']
     tool_result_msg = history_sent_to_turn_2[-2]
@@ -124,14 +129,11 @@ async def test_context_guard_truncation(mock_client_class, tmp_path):
     assert len(tool_result_msg['content']) < 2000
 
 @pytest.mark.asyncio
-@patch("mcp_server.ollama.AsyncClient")
-@patch("mcp_server.PdfReader")
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+@patch("lightweight_local_assistant.tools.PdfReader")
 async def test_read_file_tail(mock_pdf_reader, mock_client_class, tmp_path):
     """Test reading the tail of text and PDF files."""
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
 
     # 1. Text file tail
     text_file = tmp_path / "tail_test.txt"
@@ -180,7 +182,8 @@ async def test_read_file_tail(mock_pdf_reader, mock_client_class, tmp_path):
     ]
 
     with patch("os.path.exists", return_value=True):
-        await ask_local_assistant("Read tails of text and pdf")
+        assistant = LocalAssistant()
+        await assistant.ask("Read tails of text and pdf")
 
     # Verify Text Tail Result
     # History passed to Turn 2 (index 1) contains Turn 1 tool result
@@ -203,13 +206,10 @@ async def test_read_file_tail(mock_pdf_reader, mock_client_class, tmp_path):
     assert "(5 pages total)" in pdf_tool_res
 
 @pytest.mark.asyncio
-@patch("mcp_server.ollama.AsyncClient")
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
 async def test_interactive_clarification(mock_client_class):
     """Test that the assistant can pause for clarification."""
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
 
     mock_client.chat.side_effect = [
         {
@@ -225,21 +225,19 @@ async def test_interactive_clarification(mock_client_class):
         }
     ]
 
-    result = await ask_local_assistant("Fix the file")
+    assistant = LocalAssistant()
+    result = await assistant.ask("Fix the file")
 
     assert result.startswith("CLARIFICATION_REQUIRED:")
     assert "Which file do you mean?" in result
     assert mock_client.chat.call_count == 1
 
 @pytest.mark.asyncio
-@patch("mcp_server.run_shell_command")
-@patch("mcp_server.ollama.AsyncClient")
+@patch("lightweight_local_assistant.agent.run_shell_command")
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
 async def test_batch_shell_commands(mock_client_class, mock_shell):
     """Test executing multiple shell commands in one turn."""
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
     
     mock_shell.side_effect = ["Output 1", "Output 2"]
 
@@ -259,7 +257,8 @@ async def test_batch_shell_commands(mock_client_class, mock_shell):
         {'message': {'role': 'assistant', 'content': '{"status": "complete"}'}}
     ]
 
-    await ask_local_assistant("Run ls and pwd")
+    assistant = LocalAssistant()
+    await assistant.ask("Run ls and pwd")
 
     history_sent_to_turn_2 = mock_client.chat.call_args_list[1][1]['messages']
     tool_result_msg = history_sent_to_turn_2[-2]

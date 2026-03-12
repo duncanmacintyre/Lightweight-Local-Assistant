@@ -1,7 +1,7 @@
 import os
 import pytest
 import asyncio
-from mcp_server import complete_plan_step, write_file
+from lightweight_local_assistant import complete_plan_step
 
 @pytest.mark.asyncio
 async def test_complete_plan_step():

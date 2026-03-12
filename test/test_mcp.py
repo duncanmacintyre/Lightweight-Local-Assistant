@@ -4,7 +4,8 @@ import subprocess
 import ctypes
 import json
 from unittest.mock import MagicMock, patch, mock_open, AsyncMock
-import mcp_server
+from lightweight_local_assistant import is_sandboxed, run_shell_command, write_file_tool, read_file_tool, LocalAssistant
+from lightweight_local_assistant.tools import _read_local_file
 
 # --- Sandbox Detection Tests ---
 
@@ -15,7 +16,6 @@ def test_is_sandboxed_true():
         mock_libsandbox.sandbox_check.return_value = 1
         mock_cdll.return_value = mock_libsandbox
         
-        from mcp_server import is_sandboxed
         assert is_sandboxed() is True
 
 def test_is_sandboxed_false():
@@ -25,13 +25,11 @@ def test_is_sandboxed_false():
         mock_libsandbox.sandbox_check.return_value = 0
         mock_cdll.return_value = mock_libsandbox
         
-        from mcp_server import is_sandboxed
         assert is_sandboxed() is False
 
 def test_is_sandboxed_exception():
     """Test is_sandboxed returns False when an exception occurs."""
     with patch("ctypes.CDLL", side_effect=Exception("Not macOS")):
-        from mcp_server import is_sandboxed
         assert is_sandboxed() is False
 
 # --- File Reading Tests ---
@@ -41,8 +39,7 @@ def test_read_local_file_text(tmp_path):
     test_file = tmp_path / "hello.txt"
     test_file.write_text("hello world", encoding="utf-8")
     
-    from mcp_server import _read_local_file as read_fn
-    content, total, unit = read_fn(str(test_file))
+    content, total, unit = _read_local_file(str(test_file))
     assert content == "hello world"
     assert total == 1
     assert unit == "lines"
@@ -52,17 +49,16 @@ def test_read_local_file_text_partial(tmp_path):
     test_file = tmp_path / "lines.txt"
     test_file.write_text("line1\nline2\nline3\nline4\n", encoding="utf-8")
     
-    from mcp_server import _read_local_file as read_fn
     # Test offset only
-    content, total, unit = read_fn(str(test_file), offset=2)
+    content, total, unit = _read_local_file(str(test_file), offset=2)
     assert content == "line3\nline4\n"
     assert total == 4
     # Test offset and limit
-    content, total, unit = read_fn(str(test_file), offset=1, limit=2)
+    content, total, unit = _read_local_file(str(test_file), offset=1, limit=2)
     assert content == "line2\nline3\n"
     assert total == 4
 
-@patch("mcp_server.PdfReader")
+@patch("lightweight_local_assistant.tools.PdfReader")
 def test_read_local_file_pdf_partial(mock_pdf_reader, tmp_path):
     """Test reading specific pages of a PDF."""
     test_pdf = tmp_path / "test.pdf"
@@ -75,9 +71,8 @@ def test_read_local_file_pdf_partial(mock_pdf_reader, tmp_path):
     
     mock_pdf_reader.return_value.pages = [p1, p2]
     
-    from mcp_server import _read_local_file as read_fn
     # Test reading only page 2
-    content, total, unit = read_fn(str(test_pdf), pages=[2])
+    content, total, unit = _read_local_file(str(test_pdf), pages=[2])
     assert "page 2 text" in content
     assert "page 1 text" not in content
     assert "--- Page 2 ---" in content
@@ -86,19 +81,17 @@ def test_read_local_file_pdf_partial(mock_pdf_reader, tmp_path):
 
 def test_read_local_file_not_found():
     """Verify error message for non-existent files."""
-    from mcp_server import _read_local_file as read_fn
-    content, total, unit = read_fn("missing_file_xyz.txt")
+    content, total, unit = _read_local_file("missing_file_xyz.txt")
     assert "not found" in content
 
-@patch("mcp_server.PdfReader")
+@patch("lightweight_local_assistant.tools.PdfReader")
 def test_read_local_file_pdf_corrupt(mock_pdf_reader, tmp_path):
     """Verify handling of corrupted PDF files."""
     bad_pdf = tmp_path / "corrupt.pdf"
     bad_pdf.write_text("not-a-pdf")
     mock_pdf_reader.side_effect = Exception("Invalid PDF format")
     
-    from mcp_server import _read_local_file as read_fn
-    content, total, unit = read_fn(str(bad_pdf))
+    content, total, unit = _read_local_file(str(bad_pdf))
     assert "Error reading PDF" in content
 
 # --- Tool Execution Tests ---
@@ -106,18 +99,16 @@ def test_read_local_file_pdf_corrupt(mock_pdf_reader, tmp_path):
 @pytest.mark.asyncio
 async def test_write_file(tmp_path):
     """Test the write_file tool."""
-    from mcp_server import write_file
     target = tmp_path / "new.txt"
-    result = await write_file(str(target), "content")
+    result = await write_file_tool(str(target), "content")
     assert "Successfully wrote" in result
     assert target.read_text() == "content"
 
 @pytest.mark.asyncio
 async def test_run_shell_command_success():
     """Test the shell command runner."""
-    from mcp_server import run_shell_command
     
-    with patch("asyncio.create_subprocess_exec") as mock_exec:
+    with patch("asyncio.create_subprocess_shell") as mock_exec:
         mock_process = MagicMock()
         mock_process.communicate = AsyncMock(return_value=(b"ls output", b""))
         mock_process.returncode = 0
@@ -126,14 +117,12 @@ async def test_run_shell_command_success():
         result = await run_shell_command("ls")
         assert "ls output" in result
         args = mock_exec.call_args[0]
-        assert args[0:2] == ("zsh", "-c")
-        assert args[2] == "ls"
+        assert args[0] == "ls"
 
 @pytest.mark.asyncio
 async def test_run_shell_command_error():
     """Test that non-zero exit codes are handled and reported."""
-    from mcp_server import run_shell_command
-    with patch("asyncio.create_subprocess_exec") as mock_exec:
+    with patch("asyncio.create_subprocess_shell") as mock_exec:
         mock_process = MagicMock()
         mock_process.communicate = AsyncMock(return_value=(b"", b"permission denied"))
         mock_process.returncode = 1
@@ -145,16 +134,18 @@ async def test_run_shell_command_error():
 
 # --- Agent Loop Logic (Mocked Ollama) ---
 
-@pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_planning_mode(mock_client_class):
-    """Test that use_plan=True follows the 2-phase workflow."""
-    from mcp_server import ask_local_assistant
-    
+def setup_mock_client(mock_client_class):
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
     mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
     mock_client.chat = AsyncMock()
+    return mock_client
+
+@pytest.mark.asyncio
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_planning_mode(mock_client_class):
+    """Test that use_plan=True follows the 2-phase workflow."""
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.chat.side_effect = [
         # Phase 1: Planning Loop -> Agent writes the plan file
         {
@@ -190,28 +181,21 @@ async def test_ask_local_assistant_planning_mode(mock_client_class):
         # 2. Simulate plan file existing (Phase 2)
         mock_exists.side_effect = lambda path: path != ".gemini/local_plan.md" or mock_exists.call_count > 1
         
-        await ask_local_assistant("Refactor code", use_plan=True)
+        assistant = LocalAssistant()
+        await assistant.ask("Refactor code", use_plan=True)
         
         # Assertions
-        
-        # 1. Verify Planning Phase Prompt
-        # call_args_list[0] is get_model_info call (indirectly through ask_local_assistant)
-        # call_args_list[1] is the planning loop call
+        # call_args_list[0] is for get_model_info (show)
+        # call_args_list[1] is the first chat call
         plan_system_msg = mock_client.chat.call_args_list[0][1]['messages'][0]['content']
         assert "Senior Technical Planner" in plan_system_msg
         assert "Do NOT execute implementation steps yet" in plan_system_msg
-        assert mock_client.chat.call_args_list[0][1]['options'] == {'num_ctx': 32768}
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_planning_mode_warning(mock_client_class):
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_planning_mode_warning(mock_client_class):
     """Test that a warning is appended if the plan is not updated."""
-    from mcp_server import ask_local_assistant
-    
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.chat.side_effect = [
         # Phase 1: Write Plan
         {
@@ -243,19 +227,16 @@ async def test_ask_local_assistant_planning_mode_warning(mock_client_class):
         # Return False for the first call (plan not created), then True for all subsequent calls
         mock_exists.side_effect = lambda path: path != ".gemini/local_plan.md" or mock_exists.call_count > 1
 
-        result = await ask_local_assistant("Deep work", use_plan=True)
+        assistant = LocalAssistant()
+        result = await assistant.ask("Deep work", use_plan=True)
     
     assert "[Warning: Agent executed actions but failed to update the plan checklist.]" in result
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_no_tool(mock_client_class):
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_no_tool(mock_client_class):
     """Test assistant when no tool call is needed."""
-    from mcp_server import ask_local_assistant
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.chat.side_effect = [
         # 1. Main response
         {'message': {'role': 'assistant', 'content': 'direct answer'}},
@@ -263,22 +244,18 @@ async def test_ask_local_assistant_no_tool(mock_client_class):
         {'message': {'role': 'assistant', 'content': '{"status": "complete"}'}}
     ]
 
-    result = await ask_local_assistant("What is 2+2?")
+    assistant = LocalAssistant()
+    result = await assistant.ask("What is 2+2?")
     assert result == "direct answer"
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_multiple_turns(mock_client_class, tmp_path):
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_multiple_turns(mock_client_class, tmp_path):
     """Test assistant when it calls tools iteratively over multiple turns."""
-    from mcp_server import ask_local_assistant
-
     test_file = tmp_path / "a.txt"
     test_file.write_text("source")
 
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.chat.side_effect = [
         {
             'message': {
@@ -292,7 +269,8 @@ async def test_ask_local_assistant_multiple_turns(mock_client_class, tmp_path):
         {'message': {'role': 'assistant', 'content': '{"status": "complete"}'}}
     ]
 
-    result = await ask_local_assistant("Analyze a.txt")
+    assistant = LocalAssistant()
+    result = await assistant.ask("Analyze a.txt")
 
     assert result == "Done!"
     assert mock_client.chat.call_count == 3  # Tool call + Final Answer + Reflection
@@ -303,15 +281,10 @@ async def test_ask_local_assistant_multiple_turns(mock_client_class, tmp_path):
     assert "REMINDER" in first_call_messages[-1]['content']
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_reflection_incomplete(mock_client_class):
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_reflection_incomplete(mock_client_class):
     """Test that the agent self-corrects when reflection returns incomplete."""
-    from mcp_server import ask_local_assistant
-
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.chat.side_effect = [
         # 1. First attempt: Claims done, but missed something
         {'message': {'role': 'assistant', 'content': 'Partial answer.'}},
@@ -329,7 +302,8 @@ async def test_ask_local_assistant_reflection_incomplete(mock_client_class):
         {'message': {'role': 'assistant', 'content': 'Complete answer.'}},
     ]
 
-    result = await ask_local_assistant("Do full task")
+    assistant = LocalAssistant()
+    result = await assistant.ask("Do full task")
 
     assert result == "Complete answer."
     assert mock_client.chat.call_count == 4
@@ -340,23 +314,10 @@ async def test_ask_local_assistant_reflection_incomplete(mock_client_class):
     assert "Missed file B" in third_call_msgs[-2]['content']
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_turn_limit(mock_client_class):
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_turn_limit(mock_client_class):
     """Verify that the agent stops and returns a message when the turn limit is reached."""
-    from mcp_server import ask_local_assistant
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
-    mock_client.chat.return_value = {
-        'message': {
-            'role': 'assistant',
-            'tool_calls': [{'function': {'name': 'read_file', 'arguments': {'filepaths': [_ for _ in range(1)]}}}] # Just need a tool call
-        }
-    }
-    # To hit exactly 20, we need it to always call a tool. 
-    # But wait, our current mock returns one fixed dict. 
-    # If it's used 20 times, it will work.
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.chat.return_value = {
         'message': {
             'role': 'assistant',
@@ -364,19 +325,16 @@ async def test_ask_local_assistant_turn_limit(mock_client_class):
         }
     }
 
-    result = await ask_local_assistant("Do something")
+    assistant = LocalAssistant()
+    result = await assistant.ask("Do something")
     assert "maximum turn limit" in result
     assert mock_client.chat.call_count == 20
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_max_turns_override(mock_client_class):
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_max_turns_override(mock_client_class):
     """Verify that max_turns parameter correctly overrides the default."""
-    from mcp_server import ask_local_assistant
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.chat.return_value = {
         'message': {
             'role': 'assistant',
@@ -384,33 +342,27 @@ async def test_ask_local_assistant_max_turns_override(mock_client_class):
         }
     }
 
-    result = await ask_local_assistant("Do something", max_turns=5)
+    assistant = LocalAssistant()
+    result = await assistant.ask("Do something", max_turns=5)
     assert "maximum turn limit (5)" in result
     assert mock_client.chat.call_count == 5
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_planning_min_turns(mock_client_class):
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_planning_min_turns(mock_client_class):
     """Verify that planning mode enforces a minimum of 30 turns."""
-    from mcp_server import ask_local_assistant
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
+    mock_client = setup_mock_client(mock_client_class)
 
-    result = await ask_local_assistant("Plan something", use_plan=True, max_turns=10)
+    assistant = LocalAssistant()
+    result = await assistant.ask("Plan something", use_plan=True, max_turns=10)
     assert "Warning: Planning mode requires at least 30 turns" in result
     assert mock_client.chat.call_count == 0  # Should exit before any chat calls
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_agent_read_missing(mock_client_class):
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_agent_read_missing(mock_client_class):
     """Verify that if the agent tries to read a missing file, it receives an error result."""
-    from mcp_server import ask_local_assistant
-
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.chat.side_effect = [
         {
             'message': {
@@ -422,25 +374,21 @@ async def test_ask_local_assistant_agent_read_missing(mock_client_class):
         {'message': {'role': 'assistant', 'content': '{"status": "complete"}'}}
     ]
 
-    await ask_local_assistant("Read gone.txt")
+    assistant = LocalAssistant()
+    await assistant.ask("Read gone.txt")
 
     final_history = mock_client.chat.call_args_list[1][1]['messages']
     tool_msg = next(m for m in final_history if m['role'] == 'tool')
     assert "not found" in tool_msg['content']
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_read_file_partial(mock_client_class, tmp_path):
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_read_file_partial(mock_client_class, tmp_path):
     """Verify that the agent can call read_file with offset/limit/pages."""
-    from mcp_server import ask_local_assistant
-
     test_file = tmp_path / "lines.txt"
     test_file.write_text("line1\nline2\nline3\n", encoding="utf-8")
 
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.chat.side_effect = [
         {
             'message': {
@@ -457,7 +405,8 @@ async def test_ask_local_assistant_read_file_partial(mock_client_class, tmp_path
         {'message': {'role': 'assistant', 'content': '{"status": "complete"}'}}
     ]
 
-    await ask_local_assistant("Read line 2 of lines.txt")
+    assistant = LocalAssistant()
+    await assistant.ask("Read line 2 of lines.txt")
 
     # Check tool result in history
     final_history = mock_client.chat.call_args_list[1][1]['messages']
@@ -468,10 +417,10 @@ async def test_ask_local_assistant_read_file_partial(mock_client_class, tmp_path
 # --- Model & Ollama Tool Tests ---
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
+@patch("lightweight_local_assistant.models.ollama.AsyncClient")
 async def test_list_local_models(mock_client_class):
     """Test listing available Ollama models."""
-    from mcp_server import list_local_models
+    from lightweight_local_assistant import list_local_models
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
     mock_client.list = AsyncMock(return_value={
@@ -487,10 +436,10 @@ async def test_list_local_models(mock_client_class):
     assert "llama3:8b" in result
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
+@patch("lightweight_local_assistant.models.ollama.AsyncClient")
 async def test_list_local_models_empty(mock_client_class):
     """Test listing models when none are installed."""
-    from mcp_server import list_local_models
+    from lightweight_local_assistant import list_local_models
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
     mock_client.list = AsyncMock(return_value={'models': []})
@@ -498,10 +447,10 @@ async def test_list_local_models_empty(mock_client_class):
     assert "No local models found" in result
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
+@patch("lightweight_local_assistant.models.ollama.AsyncClient")
 async def test_list_local_models_error(mock_client_class):
     """Test list_local_models error handling."""
-    from mcp_server import list_local_models
+    from lightweight_local_assistant import list_local_models
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
     mock_client.list = AsyncMock(side_effect=Exception("Ollama connection failed"))
@@ -509,19 +458,16 @@ async def test_list_local_models_error(mock_client_class):
     assert "Error listing models" in result
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ask_local_assistant_custom_model(mock_client_class):
+@patch("lightweight_local_assistant.agent.ollama.AsyncClient")
+async def test_ask_lightweight_local_assistant_custom_model(mock_client_class):
     """Test assistant using a specific model."""
-    from mcp_server import ask_local_assistant
-    mock_client = MagicMock()
-    mock_client_class.return_value = mock_client
-    mock_client.show = AsyncMock(return_value={"modelinfo": {"context_length": 32768}})
-    mock_client.chat = AsyncMock()
+    mock_client = setup_mock_client(mock_client_class)
     mock_client.chat.side_effect = [
         {'message': {'content': 'using custom model'}},
         {'message': {'role': 'assistant', 'content': '{"status": "complete"}'}}
     ]
-    await ask_local_assistant("Hello", model="llama3")
+    assistant = LocalAssistant(model="llama3")
+    await assistant.ask("Hello")
     kwargs = mock_client.chat.call_args_list[0][1]
     assert kwargs['model'] == "llama3"
     assert kwargs['options'] == {'num_ctx': 32768}
